@@ -1,5 +1,9 @@
 name: mutlink
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
 jobs:
   desktop:
     strategy:

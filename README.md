@@ -6,11 +6,40 @@
 
 ## 开始使用
 
-已有预编译压缩包时，解压后可直接执行 `./mutlink`，或用随包的 `sh scripts/install.sh` 安装到用户目录；无需构建工具。`dist/SHA256SUMS` 用于核对本地发行包完整性，当前没有代码签名或自动更新服务。
+从 [GitHub Releases](https://github.com/cdcRyan/mutlink/releases) 下载对应系统的压缩包，解压后可直接执行 `./mutlink`（Windows 为 `mutlink.exe`），或用随包的 `sh scripts/install.sh` 安装到用户目录。无需 Rust、Node 或 Python。支持 macOS Apple Silicon / Intel、Linux ARM64 / x64（glibc 2.35+）和 Windows x64。
+
+仓库当前为私有：只有获得仓库访问权限的 GitHub 用户可以下载。安装 [GitHub CLI](https://cli.github.com/) 并登录后，macOS / Linux 可以执行：
+
+```sh
+gh auth login
+gh release download --repo cdcRyan/mutlink --pattern install.sh --dir /tmp/mutlink-install --clobber
+MUTLINK_USE_GH=1 sh /tmp/mutlink-install/install.sh
+# 默认安装至 ~/.local/bin；如未加入 PATH：
+export PATH="$HOME/.local/bin:$PATH"
+mutlink --version
+```
+
+Windows PowerShell：
+
+```powershell
+gh auth login
+gh release download --repo cdcRyan/mutlink --pattern install.ps1 --dir "$env:TEMP\mutlink-install" --clobber
+$env:MUTLINK_USE_GH = "1"
+& "$env:TEMP\mutlink-install\install.ps1"
+$env:Path = "$env:LOCALAPPDATA\mutlink\bin;$env:Path"
+mutlink --version
+```
+
+安装脚本自动识别平台、下载并校验 SHA256。可通过 `MUTLINK_VERSION=v0.1.0` 固定版本、`MUTLINK_INSTALL_DIR` 指定目录。升级前执行 `mutlink stop`，重跑安装命令即可；旧程序保留为 `.previous`，不会删除 Agent 数据。PATH 示例只对当前终端有效，可将对应目录加入用户持久 PATH。
+
+匿名 `curl` 安装和 Homebrew 分发的启用方式，以及维护者的发版命令，见 [发布与安装渠道](docs/distribution.md)。当前没有代码签名、公证或自动更新服务。
+
+### 从源码安装
 
 源码构建需要 Rust 1.88+ 和系统 C 编译工具。运行编译后的单文件程序不需要 Rust、Node、Python 或额外数据库。Web 资源已嵌入二进制。
 
 ```sh
+gh repo clone cdcRyan/mutlink
 cd mutlink
 cargo build --release --locked
 sh scripts/install.sh
@@ -201,7 +230,7 @@ python3 tests/tui_smoke.py  # macOS / Linux，真实 PTY 启动
 
 测试覆盖模型 SSE 工具循环、真实文件审批、Plan/拒绝审批、越界路径和符号链接、重放与篡改、双 Agent 直连、中转账号隔离、本地 API 认证、浏览器/Rust 加密互通、刷新恢复及手机/桌面布局。浏览器截图在 `.artifacts/`。所有自动化模型测试都使用本地 HTTP fixture；未用用户真实 API key 做云模型调用。
 
-本次验证环境是 Apple Silicon macOS。提供 Windows/Linux 编译分支与 CI 工作流，但未在本会话实际运行对应系统或真实 iOS/Android 设备，不能据此承诺所有旧系统版本已通过兼容性测试。
+Release 工作流在五种原生目标上执行 Rust 测试、构建和安装冒烟测试，全部通过后才发布。macOS 15、Ubuntu 22.04 和 Windows Server 2022 为构建环境；不代表所有旧系统版本或真实 iOS/Android 设备均经过验证。
 
 尚未实现的生产能力：
 
@@ -209,7 +238,7 @@ python3 tests/tui_smoke.py  # macOS / Linux，真实 PTY 启动
 - OS 沙箱/容器执行、原生移动 Agent 与系统推送。
 - WebRTC/ICE/TURN 自动打洞、Noise 前向保密握手、公钥轮换协议。
 - 操作系统密钥库、浏览器硬件密钥绑定、第三方安全审计。
-- 开机服务安装、自动升级、签名/公证、多架构正式发布渠道。
+- 开机服务安装、自动升级、签名/公证、公共包管理器收录。
 - 大规模中转集群、多租户配额、长期离线队列、跨设备共享文件同步。
 - 上下文自动压缩、provider 专用协议、浏览器自动化工具与插件生态。
 

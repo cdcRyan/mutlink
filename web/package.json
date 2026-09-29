@@ -1,0 +1,7 @@
+{
+  "name": "mutlink-browser",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Vendored NaCl dependency for the embedded mobile controller",
+  "dependencies": { "tweetnacl": "1.0.3" }
+}

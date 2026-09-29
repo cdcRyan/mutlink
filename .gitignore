@@ -1,0 +1,13 @@
+/target/
+/.mutlink/
+/.artifacts/
+/dist/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+.DS_Store
+/web/node_modules/
+__pycache__/

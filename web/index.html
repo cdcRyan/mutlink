@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#141414">
+  <title>mutlink · 设备协作</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/nacl.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header><a href="/" class="brand">mutlink<span> / 协作</span></a><button id="logout" hidden>退出登录</button></header>
+  <div id="notice" role="status" aria-live="polite">正在准备设备身份…</div>
+  <main>
+    <section id="login-panel" class="login">
+      <p class="eyebrow">你的设备，同一个工作空间</p>
+      <h1>从这里，连接你的 Agent。</h1>
+      <p class="muted">登录电脑使用的同一个账号。任务在你选择的设备执行。</p>
+      <form id="login-form">
+        <label>账号<input id="account" autocomplete="username" required maxlength="128"></label>
+        <label>密码<input id="password" type="password" autocomplete="current-password" required minlength="12" maxlength="1024"></label>
+        <label>此设备名称<input id="device-name" value="我的手机" required maxlength="80"></label>
+        <label class="check"><input id="register" type="checkbox"> 创建账号（需服务端开放注册）</label>
+        <button class="primary" type="submit">连接设备 <span aria-hidden="true">↗</span></button>
+      </form>
+    </section>
+    <section id="workspace" hidden>
+      <aside>
+        <div class="section-label">执行设备 <button id="refresh" aria-label="刷新设备">↻</button></div>
+        <label class="sr-only" for="target">选择执行设备</label>
+        <select id="target"><option value="">选择一台设备</option></select>
+        <p id="target-state" class="muted">登录后自动发现同账号设备。</p>
+        <details id="pair-panel">
+          <summary>设备配对</summary>
+          <p class="muted">先在电脑导出身份，再核对指纹。双方都需要信任对方。</p>
+          <button id="export">导出本机公开身份</button>
+          <label>本机指纹<output id="fingerprint"></output></label>
+          <label>导入电脑身份 JSON<input id="peer-file" type="file" accept=".json,application/json"></label>
+          <label>通过另一渠道核对的完整指纹<input id="peer-fingerprint" autocomplete="off" spellcheck="false" maxlength="64"></label>
+          <button id="trust">核对并信任电脑</button>
+          <button id="revoke">撤销当前设备信任</button>
+        </details>
+        <details>
+          <summary>恢复任务</summary>
+          <label>任务 ID<input id="resume-id" autocomplete="off"></label>
+          <button id="resume">查看执行进度</button>
+        </details>
+      </aside>
+      <section class="session" aria-label="Agent 会话">
+        <div class="session-heading"><span id="session-name">新会话</span><button id="new-session">新建会话</button></div>
+        <div id="conversation" tabindex="0" aria-label="执行记录">
+          <div id="empty"><strong>mutlink</strong><p>选择设备，开始一段会话。</p><small>写文件与运行命令时，请在执行设备确认。</small></div>
+        </div>
+        <form id="composer">
+          <div class="composer-top"><label class="check"><input id="plan" type="checkbox"> 只读规划</label><button type="button" id="cancel" disabled>取消任务</button></div>
+          <label class="sr-only" for="prompt">发送给 Agent 的任务</label>
+          <textarea id="prompt" placeholder="让这台设备帮你做什么？" rows="3" required maxlength="65536"></textarea>
+          <div class="composer-bottom"><span id="task-state">等待设备连接</span><button class="primary" id="send" type="submit">发送 ↗</button></div>
+        </form>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

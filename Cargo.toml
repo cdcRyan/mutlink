@@ -1,0 +1,45 @@
+[package]
+name = "mutlink"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "An independent terminal agent with encrypted multi-device collaboration"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+cap-std = "3"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+crypto_box = { version = "0.9", features = ["std"] }
+directories = "6"
+fs2 = "0.4"
+futures-util = "0.3"
+hex = "0.4"
+rand = "0.8"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["limit"] }
+unicode-width = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

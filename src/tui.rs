@@ -17,11 +17,14 @@ use serde_json::{json, Value};
 use std::{io, time::Duration};
 use tokio::sync::mpsc;
 
-const BG: Color = Color::Rgb(20, 20, 20);
-const PANEL: Color = Color::Rgb(28, 28, 28);
-const FG: Color = Color::Rgb(222, 221, 215);
-const MUTED: Color = Color::Rgb(145, 144, 139);
-const ACCENT: Color = Color::Rgb(221, 177, 124);
+const BG: Color = Color::Rgb(10, 10, 10);
+const PANEL: Color = Color::Rgb(20, 20, 20);
+const ELEMENT: Color = Color::Rgb(30, 30, 30);
+const FG: Color = Color::Rgb(238, 238, 238);
+const MUTED: Color = Color::Rgb(128, 128, 128);
+const ACCENT: Color = Color::Rgb(250, 178, 131);
+const SUCCESS: Color = Color::Rgb(126, 190, 150);
+const ERROR: Color = Color::Rgb(224, 126, 126);
 
 struct ScreenGuard;
 impl Drop for ScreenGuard {
@@ -45,10 +48,27 @@ struct ModelPicker {
     selected: usize,
 }
 
+enum TranscriptEntry {
+    User(String),
+    Assistant(String),
+    Tool {
+        call_id: String,
+        name: String,
+        arguments: Value,
+        result: Option<(bool, String, u64)>,
+    },
+    Status {
+        label: String,
+        detail: String,
+        error: bool,
+    },
+    Info(String),
+}
+
 pub struct App {
     status: Status,
     input: String,
-    transcript: String,
+    transcript: Vec<TranscriptEntry>,
     task: Option<Task>,
     session: Option<String>,
     after: i64,
@@ -83,7 +103,7 @@ impl App {
         Self {
             status,
             input: String::new(),
-            transcript: String::new(),
+            transcript: vec![],
             task: None,
             session: None,
             after: 0,
@@ -113,48 +133,97 @@ impl App {
     fn event(&mut self, event: Event) {
         self.after = self.after.max(event.seq);
         let d = event.data;
-        let text = match event.kind.as_str() {
-            "user" => format!(
-                "\n  YOU\n  {}\n\n  MUTLINK\n  ",
-                d["text"].as_str().unwrap_or("")
-            ),
-            "delta" => d["text"].as_str().unwrap_or("").into(),
-            "tool_start" => format!(
-                "\n\n  › {}  {}\n",
-                d["tool"].as_str().unwrap_or("tool"),
-                d["arguments"]
-            ),
-            "tool_result" => format!(
-                "  {} {}\n",
-                if d["output"]["ok"] == true {
-                    "✓"
+        match event.kind.as_str() {
+            "user" => self.transcript.push(TranscriptEntry::User(clean(
+                d["text"].as_str().unwrap_or(""),
+            ))),
+            "delta" => {
+                let text = clean(d["text"].as_str().unwrap_or(""));
+                if let Some(TranscriptEntry::Assistant(current)) = self.transcript.last_mut() {
+                    current.push_str(&text);
                 } else {
-                    "×"
-                },
-                d["output"]
-            ),
+                    self.transcript.push(TranscriptEntry::Assistant(text));
+                }
+            }
+            // The final assistant event repeats the already streamed content.
+            "assistant" => {
+                if !matches!(self.transcript.last(), Some(TranscriptEntry::Assistant(_))) {
+                    self.transcript.push(TranscriptEntry::Assistant(clean(
+                        d["text"].as_str().unwrap_or(""),
+                    )));
+                }
+            }
+            "tool_start" => self.transcript.push(TranscriptEntry::Tool {
+                call_id: d["call_id"].as_str().unwrap_or("").into(),
+                name: clean(d["tool"].as_str().unwrap_or("tool")),
+                arguments: d["arguments"].clone(),
+                result: None,
+            }),
+            "tool_result" => {
+                let call_id = d["call_id"].as_str().unwrap_or("");
+                let ok = d["output"]["ok"] == true;
+                let output = if ok {
+                    d["output"]["result"].to_string()
+                } else {
+                    d["output"]["error"]
+                        .as_str()
+                        .unwrap_or("Tool failed")
+                        .into()
+                };
+                let elapsed = d["elapsed_ms"].as_u64().unwrap_or(0);
+                for entry in self.transcript.iter_mut().rev() {
+                    if let TranscriptEntry::Tool {
+                        call_id: id,
+                        result,
+                        ..
+                    } = entry
+                    {
+                        if id == call_id {
+                            *result = Some((ok, clean(&output), elapsed));
+                            break;
+                        }
+                    }
+                }
+            }
             "state" => {
                 let state = d["state"].as_str().unwrap_or("");
                 if matches!(state, "failed" | "cancelled" | "unknown") {
-                    format!("\n\n  {state}: {}\n", d["error"].as_str().unwrap_or(""))
+                    self.transcript.push(TranscriptEntry::Status {
+                        label: state.into(),
+                        detail: clean(d["error"].as_str().unwrap_or("")),
+                        error: true,
+                    });
                 } else if state == "succeeded" {
-                    "\n\n  ─ completed ─\n".into()
-                } else {
-                    String::new()
+                    self.transcript.push(TranscriptEntry::Status {
+                        label: "completed".into(),
+                        detail: String::new(),
+                        error: false,
+                    });
                 }
             }
-            "metrics" => format!("\n  {} turns · {} ms", d["turns"], d["elapsed_ms"]),
-            _ => String::new(),
-        };
-        self.transcript.push_str(&clean(&text));
-        // Keep rendering bounded. Full events remain in SQLite.
-        if self.transcript.len() > 200_000 {
-            let mut boundary = self.transcript.len() - 160_000;
-            while !self.transcript.is_char_boundary(boundary) {
-                boundary += 1;
+            "metrics" => {
+                let turns = d["turns"].as_u64().unwrap_or(0);
+                let elapsed = d["elapsed_ms"].as_u64().unwrap_or(0);
+                self.transcript.push(TranscriptEntry::Status {
+                    label: format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
+                    detail: format_duration(elapsed),
+                    error: false,
+                });
             }
-            self.transcript.drain(..boundary);
+            _ => {}
         }
+        // Full events remain in SQLite; keep only the recent renderable entries.
+        if self.transcript.len() > 2_000 {
+            self.transcript.drain(..400);
+        }
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else {
+        format!("{:.1}s", milliseconds as f64 / 1_000.0)
     }
 }
 
@@ -319,7 +388,9 @@ pub async fn run(client: Client) -> Result<()> {
                     }
                 }
                 Update::History(result) => match result {
-                    Ok(v) => app.transcript.push_str(&format!("\n{}\n",clean(&serde_json::to_string_pretty(&v).unwrap_or_default()))),
+                    Ok(v) => app.transcript.push(TranscriptEntry::Info(clean(
+                        &serde_json::to_string_pretty(&v).unwrap_or_default(),
+                    ))),
                     Err(e) => app.notice=e.to_string(),
                 },
                 Update::Notice(result) => app.notice=match result { Ok(v)=>v.to_string(), Err(e)=>e.to_string() },
@@ -351,7 +422,10 @@ fn command(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Update>, t
     if text == "/new" {
         app.reset();
     } else if text == "/help" {
-        app.transcript.push_str("\n  /new  New session\n  /model  Choose a model (reload models.json)\n  /model <name>  Switch model profile\n  /sessions  Session history\n  /resume <session-id>  Local history\n  /devices  Discover devices\n  /device <full-id|local>  Execution target\n  /quit  Close UI (agent stays online)\n\n  Shift+Tab  Plan / Build\n  Ctrl+A  Review pending approval\n  Esc  Cancel task\n  PageUp / PageDown  Scroll\n  Alt+Enter  New line\n");
+        app.transcript.push(TranscriptEntry::Info(
+            "/new                 New session\n/model               Choose a model\n/model <name>        Switch model profile\n/sessions            Session history\n/resume <session-id> Local history\n/devices             Discover devices\n/device <id|local>   Execution target\n/quit                Close UI\n\nShift+Tab  Plan / Build    Ctrl+A  Review approval\nEsc        Cancel task     Alt+Enter  New line"
+                .into(),
+        ));
     } else if text == "/model" || text.starts_with("/model ") {
         if app.target.is_some() {
             app.notice =
@@ -369,10 +443,9 @@ fn command(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Update>, t
             let _ = tx.send(Update::History(c.call("sessions", Value::Null, None).await));
         });
     } else if text == "/devices" {
-        app.transcript.push_str(&format!(
-            "\n{}\n",
-            clean(&serde_json::to_string_pretty(&app.devices).unwrap_or_default())
-        ));
+        app.transcript.push(TranscriptEntry::Info(clean(
+            &serde_json::to_string_pretty(&app.devices).unwrap_or_default(),
+        )));
     } else if let Some(id) = text.strip_prefix("/resume ") {
         if app.target.is_some() {
             app.notice =
@@ -416,197 +489,22 @@ fn spawn_model(client: &Client, tx: &mpsc::UnboundedSender<Update>, name: Option
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
-    let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(5),
-        Constraint::Length(6),
-        Constraint::Length(1),
-    ])
-    .split(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  mutlink", Style::default().fg(FG).bold()),
-            Span::styled("   /   ", Style::default().fg(MUTED)),
-            Span::raw(if app.session.is_some() {
-                "session"
-            } else {
-                "new session"
-            }),
-        ])),
-        rows[0],
-    );
-    let cols = Layout::horizontal(if area.width >= 100 {
-        vec![Constraint::Min(40), Constraint::Length(30)]
+    let home = app.session.is_none() && app.transcript.is_empty();
+    if home {
+        draw_home(frame, app, area);
     } else {
-        vec![Constraint::Percentage(100)]
-    })
-    .split(rows[1]);
-    if app.transcript.is_empty() {
-        let center = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(11),
-            Constraint::Min(0),
-        ])
-        .split(cols[0])[1];
-        let logo = vec![
-            Line::from(""),
-            Line::styled(
-                "█▀▄▀█ █ █ ▀█▀ █   █ █▄ █ █▄▀",
-                Style::default().fg(FG).bold(),
-            ),
-            Line::styled(
-                "█ ▀ █ █▄█  █  █▄▄ █ █ ▀█ █ █",
-                Style::default().fg(FG).bold(),
-            ),
-            Line::from(""),
-            Line::styled(
-                "Your agent. Across your devices.",
-                Style::default().fg(MUTED),
-            ),
-            Line::from(""),
-            Line::styled(
-                "Ask anything about this workspace",
-                Style::default().fg(ACCENT),
-            ),
-            Line::from(""),
-            Line::styled(
-                "/model   models    /help   commands",
-                Style::default().fg(MUTED),
-            ),
-        ];
-        frame.render_widget(Paragraph::new(logo).alignment(Alignment::Center), center);
-    } else {
-        let width = cols[0].width.saturating_sub(4).max(1) as usize;
-        let line_count: usize = app
-            .transcript
-            .lines()
-            .map(|l| {
-                unicode_width::UnicodeWidthStr::width(l)
-                    .max(1)
-                    .div_ceil(width)
-            })
-            .sum();
-        let offset = line_count
-            .saturating_sub(cols[0].height as usize)
-            .saturating_sub(app.scroll_back as usize)
-            .min(u16::MAX as usize) as u16;
-        frame.render_widget(
-            Paragraph::new(app.transcript.as_str())
-                .wrap(Wrap { trim: false })
-                .scroll((offset, 0))
-                .block(Block::default().padding(ratatui::widgets::Padding::horizontal(2))),
-            cols[0],
-        );
+        draw_session(frame, app, area);
     }
-    if cols.len() > 1 {
-        let target = app
-            .target
-            .as_deref()
-            .and_then(|id| app.devices["trusted"][id]["device"]["name"].as_str())
-            .unwrap_or("This computer");
-        let mut lines = vec![
-            Line::styled("CONTEXT", Style::default().fg(MUTED)),
-            Line::from(""),
-            Line::from(clean(&app.status.workspace)),
-            Line::from(""),
-            Line::styled("MODEL", Style::default().fg(MUTED)),
-            Line::from(if app.target.is_some() {
-                "Managed on remote device".into()
-            } else {
-                clean(&app.status.model)
-            }),
-            Line::from(""),
-            Line::styled("EXECUTION", Style::default().fg(MUTED)),
-            Line::styled(clean(target), Style::default().fg(ACCENT)),
-            Line::from(""),
-            Line::styled("DEVICES", Style::default().fg(MUTED)),
-            Line::from(format!("● {} · local", clean(&app.status.device.name))),
-        ];
-        if let Some(devices) = app.devices["discovered"].as_array() {
-            for d in devices
-                .iter()
-                .filter(|d| d["device"]["id"] != app.status.device.id)
-            {
-                lines.push(Line::from(format!(
-                    "{} {}",
-                    if d["online"] == true { "●" } else { "○" },
-                    clean(d["device"]["name"].as_str().unwrap_or("device"))
-                )));
-            }
-        }
-        lines.extend([
-            Line::from(""),
-            Line::styled("/devices to inspect", Style::default().fg(MUTED)),
-        ]);
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .borders(Borders::LEFT)
-                    .border_style(Style::default().fg(PANEL))
-                    .padding(ratatui::widgets::Padding::new(2, 1, 1, 0)),
-            ),
-            cols[1],
-        );
-    }
-    let mode = if app.plan { "PLAN" } else { "BUILD" };
-    let title = format!(
-        "  {mode}  ·  {}  ·  {}  ",
-        if app.target.is_some() {
-            "remote"
-        } else {
-            "local"
-        },
-        if app.target.is_some() {
-            "remote model".into()
-        } else {
-            clean(&app.status.model)
-        }
-    );
-    let composer = Paragraph::new(if app.input.is_empty() {
-        " Ask mutlink…"
-    } else {
-        app.input.as_str()
-    })
-    .style(
-        Style::default()
-            .bg(PANEL)
-            .fg(if app.input.is_empty() { MUTED } else { FG }),
-    )
-    .block(
-        Block::default()
-            .title(Line::styled(title, Style::default().fg(ACCENT)))
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(ACCENT))
-            .padding(ratatui::widgets::Padding::new(2, 2, 1, 0)),
-    )
-    .wrap(Wrap { trim: false });
-    frame.render_widget(composer, rows[2]);
-    let hint = if app.approvals.is_empty() {
-        format!("  {}   ·   enter send  /help", clean(&app.notice))
-    } else {
-        format!(
-            "  {} approval(s) waiting · Ctrl+A to review on this device",
-            app.approvals.len()
-        )
-    };
-    frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(if app.approvals.is_empty() {
-            MUTED
-        } else {
-            ACCENT
-        })),
-        rows[3],
-    );
     if let Some(picker) = &app.model_picker {
-        let popup = Rect::new(
-            area.x + area.width / 20,
-            area.y + area.height / 8,
-            area.width * 9 / 10,
-            area.height * 3 / 4,
-        );
+        let width = area.width.saturating_sub(4).min(78);
+        let desired_height = (picker.catalog.models.len() as u16)
+            .saturating_mul(2)
+            .saturating_add(8);
+        let height = desired_height.min(area.height.saturating_sub(4)).max(8);
+        let popup = centered(area, width, height);
         frame.render_widget(Clear, popup);
         let block = Block::default()
-            .title(" Models · this computer ")
+            .title(" Select model ")
             .title_bottom(if app.model_pending {
                 " Switching… "
             } else {
@@ -618,10 +516,10 @@ fn draw(frame: &mut Frame, app: &App) {
             .padding(ratatui::widgets::Padding::uniform(1));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).split(inner);
+        let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).split(inner);
         frame.render_widget(
             Paragraph::new(format!(
-                "Edit models.json, then reopen /model:\n{}",
+                "{}\nChanges apply to the next task",
                 clean(&picker.catalog.path)
             ))
             .style(Style::default().fg(MUTED))
@@ -659,18 +557,17 @@ fn draw(frame: &mut Frame, app: &App) {
         frame.render_stateful_widget(
             List::new(items)
                 .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(BG).fg(ACCENT)),
+                .highlight_style(Style::default().bg(ELEMENT).fg(ACCENT).bold()),
             rows[1],
             &mut selection,
         );
     }
     if app.approval_open {
         if let Some(a) = app.approvals.first() {
-            let popup = Rect::new(
-                area.x + area.width / 10,
-                area.y + area.height / 8,
-                area.width * 8 / 10,
-                area.height * 3 / 4,
+            let popup = centered(
+                area,
+                area.width.saturating_sub(4).min(82),
+                area.height.saturating_sub(4).min(24),
             );
             frame.render_widget(Clear, popup);
             let body=format!("Task: {}\nTool: {}\n\n{}\n\nThis operation runs on this computer.\nShell has your OS user permissions.",a.task_id,a.tool,serde_json::to_string_pretty(&a.arguments).unwrap_or_default());
@@ -693,26 +590,386 @@ fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
+    let footer = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(1),
+        area.width,
+        area.height.min(1),
+    );
+    let content_height = 12.min(area.height.saturating_sub(1));
+    let content = centered(
+        Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1)),
+        area.width.saturating_sub(4).min(76),
+        content_height,
+    );
+    let rows = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Length(1),
+        Constraint::Length(5),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(content);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "█▀▄▀█ █ █ ▀█▀ █   █ █▄ █ █▄▀",
+                Style::default().fg(FG).bold(),
+            ),
+            Line::styled(
+                "█ ▀ █ █▄█  █  █▄▄ █ █ ▀█ █ █",
+                Style::default().fg(FG).bold(),
+            ),
+            Line::from(""),
+            Line::styled(
+                "Your workspace agent, available across devices",
+                Style::default().fg(MUTED),
+            ),
+        ])
+        .alignment(Alignment::Center),
+        rows[0],
+    );
+    draw_composer(frame, app, rows[2]);
+    draw_notice(frame, app, rows[3], true);
+    let footer_cols = Layout::horizontal([
+        Constraint::Percentage(55),
+        Constraint::Length(1),
+        Constraint::Percentage(45),
+    ])
+    .split(footer);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "  {}",
+            compact_path(
+                &app.status.workspace,
+                footer_cols[0].width.saturating_sub(2) as usize
+            )
+        ))
+        .style(Style::default().fg(MUTED)),
+        footer_cols[0],
+    );
+    let identity = if area.width < 80 {
+        format!("mutlink v{}  ", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!(
+            "mutlink v{}  ·  {}  ",
+            env!("CARGO_PKG_VERSION"),
+            clean(&app.status.device.name),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(identity)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(MUTED)),
+        footer_cols[2],
+    );
+}
+
+fn draw_session(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(5),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    let body = centered_width(rows[0], area.width.saturating_sub(2).min(104));
+    let lines = transcript_lines(app);
+    let render_width = body.width.saturating_sub(4).max(1) as usize;
+    let line_count: usize = lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(render_width))
+        .sum();
+    let offset = line_count
+        .saturating_sub(body.height as usize)
+        .saturating_sub(app.scroll_back as usize)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset, 0))
+            .block(Block::default().padding(ratatui::widgets::Padding::horizontal(2))),
+        body,
+    );
+    let composer = centered_width(rows[2], area.width.saturating_sub(4).min(100));
+    draw_composer(frame, app, composer);
+    draw_notice(frame, app, centered_width(rows[3], composer.width), false);
+}
+
+fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(PANEL).fg(FG))
+        .padding(ratatui::widgets::Padding::new(2, 2, 0, 0));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let prompt = if app.input.is_empty() {
+        "Ask anything, or type /help"
+    } else {
+        app.input.as_str()
+    };
+    frame.render_widget(
+        Paragraph::new(prompt)
+            .style(Style::default().fg(if app.input.is_empty() { MUTED } else { FG }))
+            .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+    let mode = if app.plan { "PLAN" } else { "BUILD" };
+    let model = if app.target.is_some() {
+        "remote model".into()
+    } else {
+        compact_path(&app.status.model, inner.width.saturating_sub(16) as usize)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(mode, Style::default().fg(ACCENT).bold()),
+            Span::styled("  ", Style::default()),
+            Span::styled(model, Style::default().fg(MUTED)),
+        ])),
+        rows[1],
+    );
+    frame.render_widget(
+        Paragraph::new(if app.target.is_some() {
+            "remote"
+        } else {
+            "local"
+        })
+        .alignment(Alignment::Right)
+        .style(Style::default().fg(MUTED)),
+        rows[1],
+    );
+}
+
+fn draw_notice(frame: &mut Frame, app: &App, area: Rect, home: bool) {
+    let (text, color) = if app.approvals.is_empty() {
+        let suffix = if home && area.width >= 72 {
+            "  ·  enter send"
+        } else {
+            ""
+        };
+        (format!("{}{}", clean(&app.notice), suffix), MUTED)
+    } else {
+        (
+            format!(
+                "{} approval(s) waiting · Ctrl+A to review",
+                app.approvals.len()
+            ),
+            ACCENT,
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(text)
+            .alignment(if home {
+                Alignment::Center
+            } else {
+                Alignment::Left
+            })
+            .style(Style::default().fg(color)),
+        area,
+    );
+}
+
+fn transcript_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for entry in &app.transcript {
+        match entry {
+            TranscriptEntry::User(text) => {
+                lines.push(Line::from(""));
+                for text_line in text.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled("┃", Style::default().fg(ACCENT)),
+                        Span::styled(
+                            format!(" {text_line} "),
+                            Style::default().bg(ELEMENT).fg(FG).bold(),
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(""));
+            }
+            TranscriptEntry::Assistant(text) => {
+                for text_line in text.lines() {
+                    lines.push(Line::styled(
+                        format!("  {text_line}"),
+                        Style::default().fg(FG),
+                    ));
+                }
+            }
+            TranscriptEntry::Tool {
+                name,
+                arguments,
+                result,
+                ..
+            } => {
+                let (mark, color) = match result {
+                    Some((true, _, _)) => ("✓", SUCCESS),
+                    Some((false, _, _)) => ("×", ERROR),
+                    None => ("›", ACCENT),
+                };
+                let elapsed = result
+                    .as_ref()
+                    .map(|(_, _, elapsed)| format!(" · {}", format_duration(*elapsed)))
+                    .unwrap_or_default();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {mark} "), Style::default().fg(color)),
+                    Span::styled(name.clone(), Style::default().fg(FG)),
+                    Span::styled(
+                        format!("  {}{elapsed}", summarize_arguments(arguments)),
+                        Style::default().fg(MUTED),
+                    ),
+                ]));
+                if let Some((false, output, _)) = result {
+                    lines.push(Line::styled(
+                        format!("      {}", compact_path(output, 180)),
+                        Style::default().fg(ERROR),
+                    ));
+                }
+            }
+            TranscriptEntry::Status {
+                label,
+                detail,
+                error,
+            } => {
+                let separator = if detail.is_empty() { "" } else { " · " };
+                lines.push(Line::styled(
+                    format!("  ─ {label}{separator}{detail}"),
+                    Style::default().fg(if *error { ERROR } else { MUTED }),
+                ));
+            }
+            TranscriptEntry::Info(text) => {
+                lines.push(Line::from(""));
+                for text_line in text.lines() {
+                    lines.push(Line::styled(
+                        format!("  {text_line}"),
+                        Style::default().fg(MUTED),
+                    ));
+                }
+                lines.push(Line::from(""));
+            }
+        }
+    }
+    lines
+}
+
+fn summarize_arguments(arguments: &Value) -> String {
+    for key in ["path", "command", "query", "pattern", "task", "agent"] {
+        if let Some(value) = arguments.get(key).and_then(Value::as_str) {
+            return compact_path(value, 72);
+        }
+    }
+    let value = arguments.to_string();
+    if value == "{}" {
+        String::new()
+    } else {
+        compact_path(&value, 72)
+    }
+}
+
+fn compact_path(value: &str, max: usize) -> String {
+    let value = clean(value);
+    if unicode_width::UnicodeWidthStr::width(value.as_str()) <= max {
+        return value;
+    }
+    let keep = max.saturating_sub(1);
+    let suffix: String = value
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{suffix}")
+}
+
+fn centered_width(area: Rect, width: u16) -> Rect {
+    let width = width.min(area.width);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y,
+        width,
+        area.height,
+    )
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn screen_content(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn event(seq: i64, kind: &str, data: Value) -> Event {
+        Event {
+            seq,
+            task_id: "task".into(),
+            session_id: "session".into(),
+            kind: kind.into(),
+            data,
+            created_at: now(),
+        }
+    }
+
     #[test]
-    fn renders_home_and_approval_at_small_and_large_sizes() {
+    fn renders_home_session_and_dialogs_responsively() {
         let root = tempfile::tempdir().unwrap();
         let agent = crate::agent::Agent::open(root.path().to_path_buf()).unwrap();
-        for (w, h) in [(120, 36), (60, 20)] {
+        for (w, h) in [(60, 20), (100, 30), (140, 40)] {
             let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
             let mut app = App::new(agent.status());
             terminal.draw(|f| draw(f, &app)).unwrap();
-            let content = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|c| c.symbol())
-                .collect::<String>();
+            let content = screen_content(&terminal);
             assert!(content.contains("mutlink"));
+            assert!(content.contains("Ask anything"));
             assert!(content.contains("BUILD"));
+            assert!(!content.contains("CONTEXT"));
+
+            app.event(event(1, "user", json!({"text":"Inspect the workspace"})));
+            app.event(event(2, "delta", json!({"text":"I will inspect it."})));
+            app.event(event(
+                3,
+                "tool_start",
+                json!({"tool":"files.read","arguments":{"path":"README.md"},"call_id":"call"}),
+            ));
+            app.event(event(
+                4,
+                "tool_result",
+                json!({"call_id":"call","output":{"ok":true,"result":"done"},"elapsed_ms":12}),
+            ));
+            app.event(event(5, "state", json!({"state":"succeeded"})));
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let content = screen_content(&terminal);
+            assert!(content.contains("Inspect the workspace"));
+            assert!(content.contains("I will inspect it."));
+            assert!(content.contains("files.read"));
+            assert!(content.contains("completed"));
+            assert!(!content.contains("YOU"));
+            assert!(!content.contains("MUTLINK"));
+            assert!(!content.contains("CONTEXT"));
+
             app.approvals.push(Approval {
                 id: "a".into(),
                 task_id: "t".into(),
@@ -724,13 +981,7 @@ mod tests {
             });
             app.approval_open = true;
             terminal.draw(|f| draw(f, &app)).unwrap();
-            let content = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|c| c.symbol())
-                .collect::<String>();
+            let content = screen_content(&terminal);
             assert!(content.contains("Review operation"));
             app.approval_open = false;
             app.model_picker = Some(ModelPicker {
@@ -738,14 +989,8 @@ mod tests {
                 selected: 0,
             });
             terminal.draw(|f| draw(f, &app)).unwrap();
-            let content = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>();
-            assert!(content.contains("Models"));
+            let content = screen_content(&terminal);
+            assert!(content.contains("Select model"));
             assert!(content.contains("default"));
             assert!(content.contains("enter switch"));
         }

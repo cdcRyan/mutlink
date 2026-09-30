@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="tui-", dir=ARTIFACTS) as root:
         assert b"history" in output and b"/resume" in output
         os.write(master, b"/model\r")
         drain(0.5)
-        assert b"Models" in output and b"models.json" in output
+        assert b"Select model" in output and b"models.json" in output
         os.write(master, b"\x1b[B\r")  # Down, Enter -> second model
         drain(0.5)
         assert cli("status")["model"] == "second-model"

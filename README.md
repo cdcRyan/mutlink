@@ -80,7 +80,7 @@ mutlink run "检查 README，修正一个明确的拼写错误并说明变更"
 
 ### 配置多个模型与界面内切换
 
-安装后直接输入 `mutlink` 进入终端操作界面，无需附加子命令。在输入框输入 `/model`，用 ↑ / ↓ 选择模型、Enter 确认、Esc 关闭；也可以输入 `/model openai` 按配置名称直接切换。当前模型会显示在输入框标题和侧栏中。
+安装后直接输入 `mutlink` 进入终端操作界面，无需附加子命令。在输入框输入 `/model`，用 ↑ / ↓ 选择模型、Enter 确认、Esc 关闭；也可以输入 `/model openai` 按配置名称直接切换。当前模式、模型和执行位置显示在输入区底部状态行中。
 
 模型配置保存在设备 home 下的 **`models.json`**，首次启动会将原有 `config.json` 中的单模型设置导入为 `default` 配置。输入 `/model` 或在终端执行 `mutlink model list` 可查看文件的完整路径；使用 `mutlink --home .mutlink` 时，路径就是 `.mutlink/models.json`。
 
@@ -309,6 +309,6 @@ Release 工作流在五种原生目标上执行 Rust 测试、构建和安装冒
 
 ## 参考与许可
 
-TUI 布局与交互参考 [OpenCode](https://github.com/anomalyco/opencode)，调研固定提交 `7945de208964a49300d7f770d1a71d078db9a4c4`。mutlink 的 Agent、界面与协议为本项目独立实现，未嵌入 OpenCode 源码。
+TUI 布局与交互参考 [OpenCode](https://github.com/anomalyco/opencode)，调研固定提交 `2fa3363c9`。mutlink 的 Agent、界面与协议为本项目独立实现，未嵌入 OpenCode 源码。
 
 项目使用 MIT；浏览器加密依赖 TweetNaCl 的许可随 `web/vendor/TWEETNACL-LICENSE` 分发。其他 Rust 依赖见 `Cargo.lock`。

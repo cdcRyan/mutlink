@@ -488,6 +488,7 @@ fn spawn_model(client: &Client, tx: &mpsc::UnboundedSender<Update>, name: Option
 
 fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    frame.render_widget(Clear, area);
     frame.render_widget(Block::default().style(Style::default().bg(BG).fg(FG)), area);
     let home = app.session.is_none() && app.transcript.is_empty();
     if home {
@@ -597,10 +598,10 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
         area.width,
         area.height.min(1),
     );
-    let content_height = 12.min(area.height.saturating_sub(1));
+    let content_height = 11.min(area.height.saturating_sub(1));
     let content = centered(
         Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1)),
-        area.width.saturating_sub(4).min(76),
+        area.width.saturating_sub(4).min(75),
         content_height,
     );
     let rows = Layout::vertical([
@@ -608,7 +609,6 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(1),
         Constraint::Length(5),
         Constraint::Length(1),
-        Constraint::Min(0),
     ])
     .split(content);
     frame.render_widget(
@@ -621,9 +621,12 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
                 "█ ▀ █ █▄█  █  █▄▄ █ █ ▀█ █ █",
                 Style::default().fg(FG).bold(),
             ),
-            Line::from(""),
             Line::styled(
-                "Your workspace agent, available across devices",
+                "      workspace agent across devices",
+                Style::default().fg(ACCENT),
+            ),
+            Line::styled(
+                "      local first · peer to peer",
                 Style::default().fg(MUTED),
             ),
         ])
@@ -667,16 +670,22 @@ fn draw_home(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_session(frame: &mut Frame, app: &App, area: Rect) {
+    let page = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(1),
+    );
     let rows = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(1),
         Constraint::Length(5),
         Constraint::Length(1),
     ])
-    .split(area);
-    let body = centered_width(rows[0], area.width.saturating_sub(2).min(104));
+    .split(page);
+    let body = rows[0];
     let lines = transcript_lines(app);
-    let render_width = body.width.saturating_sub(4).max(1) as usize;
+    let render_width = body.width.max(1) as usize;
     let line_count: usize = lines
         .iter()
         .map(|line| line.width().max(1).div_ceil(render_width))
@@ -688,23 +697,32 @@ fn draw_session(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((offset, 0))
-            .block(Block::default().padding(ratatui::widgets::Padding::horizontal(2))),
+            .scroll((offset, 0)),
         body,
     );
-    let composer = centered_width(rows[2], area.width.saturating_sub(4).min(100));
-    draw_composer(frame, app, composer);
-    draw_notice(frame, app, centered_width(rows[3], composer.width), false);
+    draw_composer(frame, app, rows[2]);
+    draw_notice(frame, app, rows[3], false);
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let surface = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    let shadow = Rect::new(
+        area.x.saturating_add(1),
+        area.bottom().saturating_sub(1),
+        area.width.saturating_sub(1),
+        area.height.min(1),
+    );
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(ACCENT))
         .style(Style::default().bg(PANEL).fg(FG))
-        .padding(ratatui::widgets::Padding::new(2, 2, 0, 0));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 0));
+    let inner = block.inner(surface);
+    frame.render_widget(block, surface);
+    frame.render_widget(Block::default().style(Style::default().bg(ELEMENT)), shadow);
     if inner.height == 0 {
         return;
     }
@@ -887,16 +905,6 @@ fn compact_path(value: &str, max: usize) -> String {
     format!("…{suffix}")
 }
 
-fn centered_width(area: Rect, width: u16) -> Rect {
-    let width = width.min(area.width);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y,
-        width,
-        area.height,
-    )
-}
-
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -969,6 +977,7 @@ mod tests {
             assert!(!content.contains("YOU"));
             assert!(!content.contains("MUTLINK"));
             assert!(!content.contains("CONTEXT"));
+            assert!(!content.contains("workspace agent across devices"));
 
             app.approvals.push(Approval {
                 id: "a".into(),

@@ -1,4 +1,4 @@
-use crate::{client::Client, model::*};
+use crate::{client::Client, model::*, models::ModelList};
 use anyhow::Result;
 use crossterm::{
     event::{
@@ -11,7 +11,7 @@ use crossterm::{
 use futures_util::StreamExt;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::{json, Value};
 use std::{io, time::Duration};
@@ -37,6 +37,12 @@ enum Update {
     History(Result<Value>),
     Notice(Result<Value>),
     Devices(Result<Value>),
+    Models(Result<ModelList>, bool),
+}
+
+struct ModelPicker {
+    catalog: ModelList,
+    selected: usize,
 }
 
 pub struct App {
@@ -57,6 +63,8 @@ pub struct App {
     busy: bool,
     polling: bool,
     generation: u64,
+    model_picker: Option<ModelPicker>,
+    model_pending: bool,
 }
 
 fn clean(text: &str) -> String {
@@ -70,7 +78,7 @@ impl App {
         let notice = if status.provider_ready {
             "Ready".into()
         } else {
-            "Configure a model: mutlink model set --help".into()
+            "Type /model to choose a model or find models.json".into()
         };
         Self {
             status,
@@ -90,6 +98,8 @@ impl App {
             busy: false,
             polling: false,
             generation: 0,
+            model_picker: None,
+            model_pending: false,
         }
     }
     fn reset(&mut self) {
@@ -149,6 +159,8 @@ impl App {
 }
 
 pub async fn run(client: Client) -> Result<()> {
+    // A returning terminal picks up edits even if the daemon was already running.
+    client.call("model.list", Value::Null, None).await?;
     let status: Status = serde_json::from_value(client.call("status", Value::Null, None).await?)?;
     enable_raw_mode()?;
     let _guard = ScreenGuard;
@@ -164,12 +176,27 @@ pub async fn run(client: Client) -> Result<()> {
         tokio::select! {
             Some(result) = input.next() => {
                 match result? {
-                    Input::Paste(text) if !app.approval_open => {
+                    Input::Paste(text) if !app.approval_open && app.model_picker.is_none() => {
                         if app.input.len()+text.len() <= 65536 { app.input.push_str(&clean(&text)); }
                     }
                     Input::Key(key) if key.kind == KeyEventKind::Press => {
                         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                         if ctrl && key.code == KeyCode::Char('c') { break; }
+                        if let Some(picker) = app.model_picker.as_mut() {
+                            match key.code {
+                                KeyCode::Esc => app.model_picker = None,
+                                KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+                                KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.catalog.models.len().saturating_sub(1)),
+                                KeyCode::Enter if !app.model_pending => {
+                                    if let Some(model) = picker.catalog.models.get(picker.selected) {
+                                        app.model_pending = true;
+                                        spawn_model(&client, &tx, Some(model.name.clone()));
+                                    }
+                                }
+                                _ => {},
+                            }
+                            continue;
+                        }
                         if app.approval_open {
                             match key.code {
                                 KeyCode::Char('y') | KeyCode::Char('n') => {
@@ -198,14 +225,15 @@ pub async fn run(client: Client) -> Result<()> {
                             KeyCode::PageDown => app.scroll_back = app.scroll_back.saturating_sub(10),
                             KeyCode::Backspace => { app.input.pop(); }
                             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => app.input.push('\n'),
-                            KeyCode::Enter if !app.input.trim().is_empty() && !app.busy => {
+                            KeyCode::Enter if !app.input.trim().is_empty() && !app.model_pending
+                                && (!app.busy || app.input.trim() == "/model" || app.input.trim().starts_with("/model ")) => {
                                 let prompt = std::mem::take(&mut app.input);
                                 if prompt == "/quit" { break; }
                                 if prompt.starts_with('/') {
                                     command(&mut app, &client, &tx, &prompt);
                                 } else {
                                     app.busy = true; app.notice = "Submitting…".into();
-                                    let request = RunRequest { id: id(), session_id: app.session.clone(), prompt, plan: app.plan };
+                                    let request = RunRequest { id: id(), session_id: app.session.clone(), prompt, plan: app.plan, delegation_depth: 0 };
                                     let c = client.clone(); let tx = tx.clone(); let target = app.target.clone();
                                     tokio::spawn(async move {
                                         let result = async { Ok(serde_json::from_value(c.call("run", json!(request), target.as_deref()).await?)?) }.await;
@@ -271,6 +299,25 @@ pub async fn run(client: Client) -> Result<()> {
                 }
                 Update::Devices(Ok(value)) => app.devices=value,
                 Update::Devices(Err(e)) => app.notice=format!("Discovery: {e}"),
+                Update::Models(result, open) => {
+                    app.model_pending = false;
+                    match result {
+                        Ok(catalog) => {
+                            let selected = catalog.models.iter().position(|m| m.name == catalog.selected).unwrap_or(0);
+                            if let Some(model) = catalog.models.get(selected) {
+                                app.status.model = model.model.clone();
+                                app.status.provider_ready = model.ready;
+                                app.notice = if model.ready {
+                                    format!("Model: {} · applies to your next task", model.name)
+                                } else {
+                                    format!("Model: {} · set {} before starting the daemon", model.name, model.api_key_env)
+                                };
+                            }
+                            app.model_picker = if open { Some(ModelPicker { catalog, selected }) } else { None };
+                        }
+                        Err(error) => app.notice = format!("{error:#}"),
+                    }
+                }
                 Update::History(result) => match result {
                     Ok(v) => app.transcript.push_str(&format!("\n{}\n",clean(&serde_json::to_string_pretty(&v).unwrap_or_default()))),
                     Err(e) => app.notice=e.to_string(),
@@ -300,10 +347,21 @@ fn spawn_call(
 }
 
 fn command(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Update>, text: &str) {
+    let text = text.trim();
     if text == "/new" {
         app.reset();
     } else if text == "/help" {
-        app.transcript.push_str("\n  /new  New session\n  /sessions  Session history\n  /resume <session-id>  Local history\n  /devices  Discover devices\n  /device <full-id|local>  Execution target\n  /quit  Close UI (agent stays online)\n\n  Shift+Tab  Plan / Build\n  Ctrl+A  Review pending approval\n  Esc  Cancel task\n  PageUp / PageDown  Scroll\n  Alt+Enter  New line\n");
+        app.transcript.push_str("\n  /new  New session\n  /model  Choose a model (reload models.json)\n  /model <name>  Switch model profile\n  /sessions  Session history\n  /resume <session-id>  Local history\n  /devices  Discover devices\n  /device <full-id|local>  Execution target\n  /quit  Close UI (agent stays online)\n\n  Shift+Tab  Plan / Build\n  Ctrl+A  Review pending approval\n  Esc  Cancel task\n  PageUp / PageDown  Scroll\n  Alt+Enter  New line\n");
+    } else if text == "/model" || text.starts_with("/model ") {
+        if app.target.is_some() {
+            app.notice =
+                "Choose models on the execution device; /device local switches back here.".into();
+        } else {
+            app.model_pending = true;
+            app.notice = "Loading models…".into();
+            let name = text.strip_prefix("/model ").map(|s| s.trim().to_owned());
+            spawn_model(client, tx, name);
+        }
     } else if text == "/sessions" {
         let c = client.clone();
         let tx = tx.clone();
@@ -334,6 +392,25 @@ fn command(app: &mut App, client: &Client, tx: &mpsc::UnboundedSender<Update>, t
     } else {
         app.notice = "Unknown command · /help".into();
     }
+}
+
+fn spawn_model(client: &Client, tx: &mpsc::UnboundedSender<Update>, name: Option<String>) {
+    let client = client.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let open = name.is_none();
+        let (action, payload) = match name {
+            Some(name) => ("model.use", json!({"name":name})),
+            None => ("model.list", Value::Null),
+        };
+        let result = async {
+            Ok(serde_json::from_value(
+                client.call(action, payload, None).await?,
+            )?)
+        }
+        .await;
+        let _ = tx.send(Update::Models(result, open));
+    });
 }
 
 fn draw(frame: &mut Frame, app: &App) {
@@ -393,7 +470,7 @@ fn draw(frame: &mut Frame, app: &App) {
             ),
             Line::from(""),
             Line::styled(
-                "/help   commands     shift+tab   mode",
+                "/model   models    /help   commands",
                 Style::default().fg(MUTED),
             ),
         ];
@@ -433,7 +510,11 @@ fn draw(frame: &mut Frame, app: &App) {
             Line::from(clean(&app.status.workspace)),
             Line::from(""),
             Line::styled("MODEL", Style::default().fg(MUTED)),
-            Line::from(clean(&app.status.model)),
+            Line::from(if app.target.is_some() {
+                "Managed on remote device".into()
+            } else {
+                clean(&app.status.model)
+            }),
             Line::from(""),
             Line::styled("EXECUTION", Style::default().fg(MUTED)),
             Line::styled(clean(target), Style::default().fg(ACCENT)),
@@ -469,11 +550,16 @@ fn draw(frame: &mut Frame, app: &App) {
     }
     let mode = if app.plan { "PLAN" } else { "BUILD" };
     let title = format!(
-        "  {mode}  ·  {}  ",
+        "  {mode}  ·  {}  ·  {}  ",
         if app.target.is_some() {
             "remote"
         } else {
             "local"
+        },
+        if app.target.is_some() {
+            "remote model".into()
+        } else {
+            clean(&app.status.model)
         }
     );
     let composer = Paragraph::new(if app.input.is_empty() {
@@ -511,6 +597,73 @@ fn draw(frame: &mut Frame, app: &App) {
         })),
         rows[3],
     );
+    if let Some(picker) = &app.model_picker {
+        let popup = Rect::new(
+            area.x + area.width / 20,
+            area.y + area.height / 8,
+            area.width * 9 / 10,
+            area.height * 3 / 4,
+        );
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Models · this computer ")
+            .title_bottom(if app.model_pending {
+                " Switching… "
+            } else {
+                " ↑↓ choose · enter switch · esc close "
+            })
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(ACCENT))
+            .style(Style::default().bg(PANEL).fg(FG))
+            .padding(ratatui::widgets::Padding::uniform(1));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(1)]).split(inner);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Edit models.json, then reopen /model:\n{}",
+                clean(&picker.catalog.path)
+            ))
+            .style(Style::default().fg(MUTED))
+            .wrap(Wrap { trim: false }),
+            rows[0],
+        );
+        let items: Vec<_> = picker
+            .catalog
+            .models
+            .iter()
+            .map(|model| {
+                ListItem::new(vec![
+                    Line::from(format!(
+                        "{}{} · {}",
+                        if model.name == picker.catalog.selected {
+                            "● "
+                        } else {
+                            "  "
+                        },
+                        clean(&model.name),
+                        clean(&model.model)
+                    )),
+                    Line::styled(
+                        if model.ready {
+                            clean(&model.base_url)
+                        } else {
+                            format!("Set {} to use this model", clean(&model.api_key_env))
+                        },
+                        Style::default().fg(MUTED),
+                    ),
+                ])
+            })
+            .collect();
+        let mut selection = ListState::default().with_selected(Some(picker.selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("› ")
+                .highlight_style(Style::default().bg(BG).fg(ACCENT)),
+            rows[1],
+            &mut selection,
+        );
+    }
     if app.approval_open {
         if let Some(a) = app.approvals.first() {
             let popup = Rect::new(
@@ -579,6 +732,22 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect::<String>();
             assert!(content.contains("Review operation"));
+            app.approval_open = false;
+            app.model_picker = Some(ModelPicker {
+                catalog: crate::models::execute(&agent, "model.list", &Value::Null).unwrap(),
+                selected: 0,
+            });
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let content = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(content.contains("Models"));
+            assert!(content.contains("default"));
+            assert!(content.contains("enter switch"));
         }
     }
 }

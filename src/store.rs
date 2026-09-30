@@ -28,6 +28,7 @@ impl Store {
                session_id TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL,
                created_at INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS events_session ON events(session_id, seq);
+             CREATE INDEX IF NOT EXISTS events_task_kind ON events(task_id, kind, seq);
              CREATE TABLE IF NOT EXISTS approvals (
                id TEXT PRIMARY KEY, task_id TEXT NOT NULL, tool TEXT NOT NULL,
                arguments TEXT NOT NULL, state TEXT NOT NULL,
@@ -147,6 +148,23 @@ impl Store {
 
     pub fn task(&self, task_id: &str) -> Result<Task> {
         query_task(&self.0.lock().unwrap(), task_id)
+    }
+
+    pub fn task_answer(&self, task_id: &str) -> Result<Value> {
+        let db = self.0.lock().unwrap();
+        let body: Option<String> = db.query_row(
+            "SELECT data FROM events WHERE task_id=?1 AND kind='assistant' ORDER BY seq DESC LIMIT 1",
+            [task_id], |r| r.get(0),
+        ).optional()?;
+        let data: Value = body
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or(Value::Null);
+        let text = data["text"].as_str().unwrap_or("");
+        Ok(serde_json::json!({
+            "text":text.chars().take(32768).collect::<String>(),
+            "truncated":text.chars().count() > 32768,
+        }))
     }
 
     pub fn tasks(&self) -> Result<Vec<Task>> {
@@ -375,6 +393,7 @@ mod tests {
             session_id: None,
             prompt: "hello".into(),
             plan: false,
+            delegation_depth: 0,
         };
         let (t, fresh) = s.admit(&r, "alice", "/work").unwrap();
         assert!(fresh);
@@ -397,5 +416,27 @@ mod tests {
         assert_eq!(s.consume_approval(&a.id).unwrap(), Some(true));
         assert_eq!(s.consume_approval(&a.id).unwrap(), Some(false));
         assert!(s.decide(&a.id, true).is_err());
+    }
+
+    #[test]
+    fn legacy_requests_remain_idempotent_and_depth_is_part_of_identity() {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let legacy = r#"{"id":"legacy","session_id":null,"prompt":"hello","plan":false}"#;
+        let mut request: RunRequest = serde_json::from_str(legacy).unwrap();
+        assert_eq!(serde_json::to_string(&request).unwrap(), legacy);
+        let (task, _) = store.admit(&request, "alice", "/work").unwrap();
+        assert!(!store.admit(&request, "alice", "/work").unwrap().1);
+        request.delegation_depth = 1;
+        assert!(store.admit(&request, "alice", "/work").is_err());
+        store
+            .event(
+                &task,
+                "assistant",
+                serde_json::json!({"text":"界".repeat(32769)}),
+            )
+            .unwrap();
+        let answer = store.task_answer(&task.id).unwrap();
+        assert_eq!(answer["text"].as_str().unwrap().chars().count(), 32768);
+        assert_eq!(answer["truncated"], true);
     }
 }

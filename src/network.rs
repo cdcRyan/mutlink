@@ -14,6 +14,17 @@ use std::{
 use tokio::sync::oneshot;
 
 type Waiter = (String, oneshot::Sender<RemoteResponse>);
+struct PendingRequest<'a> {
+    network: &'a Network,
+    id: String,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.network.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
 pub struct Network {
     pub agent: Arc<Agent>,
     pub shutdown: tokio_util::sync::CancellationToken,
@@ -23,8 +34,8 @@ pub struct Network {
 
 impl Network {
     pub fn new(agent: Arc<Agent>) -> Arc<Self> {
-        Arc::new(Self {
-            agent,
+        let network = Arc::new(Self {
+            agent: agent.clone(),
             pending: Mutex::new(HashMap::new()),
             shutdown: tokio_util::sync::CancellationToken::new(),
             http: reqwest::Client::builder()
@@ -32,7 +43,9 @@ impl Network {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
-        })
+        });
+        *agent.network.write().unwrap() = Arc::downgrade(&network);
+        network
     }
 
     pub fn dispatch(&self, source: &str, action: &str, payload: Value) -> Result<Value> {
@@ -42,13 +55,17 @@ impl Network {
                 self.agent
                     .submit(serde_json::from_value(payload)?, source)?,
             )?),
-            "task" | "events" | "cancel" => {
+            "task" | "events" | "cancel" | "result" => {
                 let task_id = payload["task_id"].as_str().context("Missing task_id")?;
                 let task = self.agent.store.task(task_id)?;
                 if task.source_device != source {
                     bail!("Task belongs to another device");
                 }
                 match action {
+                    "result" => Ok(json!({
+                        "task":task,
+                        "answer":self.agent.store.task_answer(task_id)?,
+                    })),
                     "events" => Ok(json!(self.agent.store.events(
                         Some(&task.session_id),
                         payload["after"].as_i64().unwrap_or(0)
@@ -162,7 +179,11 @@ impl Network {
             .lock()
             .unwrap()
             .insert(request.id.clone(), (target.into(), tx));
-        let result: Result<Value> = async {
+        let _pending = PendingRequest {
+            network: self,
+            id: request.id.clone(),
+        };
+        async {
             self.send_relay(login, &crypto::seal(&cfg, target, clear)?)
                 .await?;
             let response = tokio::time::timeout(Duration::from_secs(45), rx)
@@ -172,9 +193,7 @@ impl Network {
             )??;
             response_value(response)
         }
-        .await;
-        self.pending.lock().unwrap().remove(&request.id);
-        result
+        .await
     }
 
     async fn send_relay(&self, login: &config::RelayLogin, packet: &Packet) -> Result<()> {

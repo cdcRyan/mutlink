@@ -111,6 +111,7 @@ async fn real_stream_tool_loop_blocks_write_until_exact_approval() {
         session_id: None,
         prompt: "Read input, then write output".into(),
         plan: false,
+        delegation_depth: 0,
     };
     let t = a.submit(request.clone(), &source).unwrap();
     let approval = until_approval(&a).await;
@@ -143,6 +144,7 @@ async fn plan_mode_and_rejected_approval_cannot_modify_files() {
                     session_id: None,
                     prompt: "test".into(),
                     plan,
+                    delegation_depth: 0,
                 },
                 &a.status().device.id,
             )
@@ -186,6 +188,7 @@ async fn direct_two_agents_enforce_identity_replay_and_task_ownership() {
         session_id: None,
         prompt: "remote task".into(),
         plan: false,
+        delegation_depth: 0,
     };
     let t: Task =
         serde_json::from_value(an.remote(&target, "run", json!(request)).await.unwrap()).unwrap();

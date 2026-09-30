@@ -35,6 +35,11 @@ pub struct Capability {
 pub fn capabilities() -> Vec<Capability> {
     [
         ("agent.run", "Run an independent agent session", "approval"),
+        (
+            "agent.collaborate",
+            "Delegate tasks and exchange agent results (up to 2 hops)",
+            "approval",
+        ),
         ("files.list", "List workspace files", "read"),
         ("files.read", "Read a workspace file", "read"),
         ("files.search", "Search workspace text", "read"),
@@ -106,6 +111,12 @@ pub struct RunRequest {
     pub prompt: String,
     #[serde(default)]
     pub plan: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delegation_depth: u8,
+}
+
+fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

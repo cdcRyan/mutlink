@@ -1,6 +1,6 @@
 use crate::{
     agent::Agent,
-    config::{self, Config, Provider},
+    config::{self, Config},
     crypto::Packet,
     model::*,
     network::Network,
@@ -151,21 +151,14 @@ pub async fn execute(net: &Arc<Network>, request: Rpc) -> Result<Value> {
             }
             Ok(json!({"revoked":id}))
         }
-        "model.set" => {
-            let provider: Provider = serde_json::from_value(p)?;
-            config::check_url(&provider.base_url)?;
-            if provider.model.is_empty()
-                || provider.api_key_env.is_empty()
-                || provider.max_steps == 0
-                || provider.max_steps > 100
-            {
-                bail!("Model, API key environment name and 1–100 steps required");
+        "model.list" | "model.use" | "model.set" => {
+            let models = crate::models::execute(a, &request.action, &p)
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+            if request.action == "model.set" {
+                Ok(json!(a.status()))
+            } else {
+                Ok(json!(models))
             }
-            update(a, |c| {
-                c.provider = provider;
-                Ok(())
-            })?;
-            Ok(json!(a.status()))
         }
         "workspace.set" => {
             let path = PathBuf::from(p["path"].as_str().context("Missing path")?).canonicalize()?;

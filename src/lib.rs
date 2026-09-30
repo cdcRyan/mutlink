@@ -1,8 +1,10 @@
 pub mod agent;
 pub mod client;
+pub mod collaboration;
 pub mod config;
 pub mod crypto;
 pub mod model;
+pub mod models;
 pub mod network;
 pub mod provider;
 pub mod relay;

@@ -22,6 +22,7 @@ archive = out / f"mutlink-v{version}-{target}.{extension}"
 files = [
     (binary, exe), (root / "README.md", "README.md"),
     (root / "LICENSE", "LICENSE"),
+    (root / "models.example.json", "models.example.json"),
     (root / "web/vendor/TWEETNACL-LICENSE", "TWEETNACL-LICENSE"),
     (root / "Cargo.lock", "Cargo.lock"),
     (root / "scripts/install.sh", "scripts/install.sh"),

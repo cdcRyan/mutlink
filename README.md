@@ -1,6 +1,6 @@
 # mutlink
 
-一个可独立工作的终端 Agent，同时支持跨设备协作。默认执行 `mutlink` 打开参考 OpenCode 交互组织的 TUI；不登录也能使用本地模型和工作空间。手机浏览器可通过自托管中转服务控制已配对的电脑。
+两个独立设备上的 Agent 可在同一局域网内通过加密协议互相发送任务、追问并回传结果，各自在自己的工作空间执行。每端也可单独工作。默认执行 `mutlink` 打开参考 OpenCode 交互组织的 TUI；不登录也能使用本地模型和工作空间。手机浏览器可通过自托管中转服务控制已配对的电脑。
 
 当前是可运行的 **0.1 原型实现**，不是完整生产发行。模型调用、工具执行、数据库、加密与通信均为真实实现；测试中使用本地模拟模型服务，不消耗云端额度。
 
@@ -78,6 +78,48 @@ mutlink run "检查 README，修正一个明确的拼写错误并说明变更"
 
 没有配置可用模型时显示配置提示，不伪造 Agent 回答。不是所有标注“OpenAI 兼容”的服务都支持工具调用；供应商兼容性须实际验证。
 
+### 配置多个模型与界面内切换
+
+安装后直接输入 `mutlink` 进入终端操作界面，无需附加子命令。在输入框输入 `/model`，用 ↑ / ↓ 选择模型、Enter 确认、Esc 关闭；也可以输入 `/model openai` 按配置名称直接切换。当前模型会显示在输入框标题和侧栏中。
+
+模型配置保存在设备 home 下的 **`models.json`**，首次启动会将原有 `config.json` 中的单模型设置导入为 `default` 配置。输入 `/model` 或在终端执行 `mutlink model list` 可查看文件的完整路径；使用 `mutlink --home .mutlink` 时，路径就是 `.mutlink/models.json`。
+
+```json
+{
+  "default": "openai",
+  "models": {
+    "openai": {
+      "model": "gpt-4.1",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "max_steps": 24
+    },
+    "local": {
+      "model": "your-local-model",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key_env": "LOCAL_MODEL_API_KEY"
+    }
+  }
+}
+```
+
+`openai`、`local` 是 `/model` 使用的配置名称，可以自定义；`model` 则必须填写服务商实际提供的模型 ID。`max_steps` 可省略，默认 24。可参考仓库中的 [models.example.json](models.example.json) 添加配置。
+
+保存文件后重新输入 `/model`，或重新打开 `mutlink`，就会加载修改。切换会保存为默认选择，下一次任务使用新模型，已有会话上下文继续保留；正在执行的任务使用启动时的模型配置。配置无效时保留运行中的设置并显示错误。
+
+密钥仍通过 `api_key_env` 指定的环境变量读取，需在启动后台 Agent 前设置。增加或更改密钥后，执行 `mutlink stop`，从已设置环境变量的终端重新启动。模型列表中的密钥提示反映配置情况，不代表已成功连接模型服务。
+
+也可以通过 CLI 管理模型：
+
+```sh
+mutlink model list
+mutlink model use openai
+mutlink model set --name coding --model your-model \
+  --base-url https://your-provider.example/v1 --api-key-env YOUR_API_KEY
+```
+
+`model set` 添加或更新指定配置并切换到它，保留其他配置；省略 `--name` 时使用模型 ID 作为配置名称。模型管理仅作用于当前设备，远端模型需在执行设备上切换。
+
 ### 终端交互
 
 | 操作 | 用途 |
@@ -89,6 +131,7 @@ mutlink run "检查 README，修正一个明确的拼写错误并说明变更"
 | PageUp / PageDown | 滚动执行记录与审批内容 |
 | Ctrl+C / `/quit` | 退出界面，保留后台 Agent |
 | `/new`、`/sessions`、`/resume <session-id>` | 新会话、历史列表、恢复本地会话 |
+| `/model`、`/model <名称>` | 打开模型选择器、按配置名称切换模型 |
 | `/devices`、`/device <完整设备ID>`、`/device local` | 设备详情、选择远端或本地执行 |
 
 文件读取、列表和搜索限制在已授权工作空间。写文件与 Shell 必须逐次确认；原文件写入前生成同目录备份。Shell 使用当前操作系统用户权限，**不属于 OS 沙箱**，即使工作目录限定，也可以访问该用户有权访问的其他资源。
@@ -97,35 +140,54 @@ mutlink run "检查 README，修正一个明确的拼写错误并说明变更"
 
 ## 跨电脑直连
 
-两台电脑分别初始化并命名，保持 Agent 运行。以下假设电脑 A 是控制端，B 是执行端：
+两台电脑分别配置模型与工作空间，保持 Agent 运行。双方角色对等，都需要开放 peer 端口并导出可访问的局域网地址。以下示例 A 为 `192.168.1.10`，B 为 `192.168.1.20`，请替换为实际地址：
 
 ```sh
-# B：开放只接收加密包的 peer 端口
+# A、B 分别执行：开放只接收加密包的 peer 端口，保持此进程运行
 mutlink stop
 mutlink serve --peer-listen 0.0.0.0:7447
+
+# A 的另一个终端：填写 B 能访问的地址，导出公开身份
+mutlink device --name "Office A" --endpoint http://192.168.1.10:7447
+mutlink pair export > a-public.json
 
 # B 的另一个终端：填写 A 能访问的地址，导出公开身份
 mutlink device --name "Build Mac" --endpoint http://192.168.1.20:7447
 mutlink pair export > b-public.json
-
-# A：导出公开身份
-mutlink pair export > a-public.json
 ```
 
 通过可信渠道交换公开文件，另行核对双方完整 64 位指纹（JSON 的 `id` 字段）。不要只对比短前缀。
 
 ```sh
-# A 信任 B，用于加密发送和验证返回结果
-mutlink pair trust b-public.json --fingerprint <B的完整ID>
+# A 信任 B，并允许 B 发起 Agent 任务
+mutlink pair trust b-public.json --fingerprint <B的完整ID> --allow-agent
 
 # B 信任 A，并允许 A 发起 Agent 任务
 mutlink pair trust a-public.json --fingerprint <A的完整ID> --allow-agent
 
 # A：交给 B 执行
 mutlink run "检查项目目录并说明结构" --plan --device <B的完整ID>
+
+# B：也可以交给 A 执行
+mutlink run "检查工作空间并列出可用资料" --plan --device <A的完整ID>
+
+# A：让本机 Agent 自主与 B 沟通，收到回复后继续汇总
+mutlink run "请与 Build Mac 的 Agent 协作：让它检查自己的项目结构，你检查本机项目结构，必要时互相补充信息，最后汇总两边的模块分工。" --plan
 ```
 
 直连使用已固定公钥的端到端密文，LAN HTTP 不承载明文任务或登录凭据。本地管理 API 始终单独绑定随机 loopback 端口，需要本机令牌，并拒绝浏览器 Origin。
+
+### Agent 自主协作
+
+模型通过 `list_agents` 查看已配对设备，通过 `ask_agent` 发送任务或问题，并将对方回复作为工具结果继续处理。返回的远端 `session_id` 可用于追问，保留对方会话上下文。双方需要运行支持 `agent.collaborate` 的版本；不需要账号或中转服务器。设备列表来自手动配对，尚无局域网广播发现。
+
+- 每端使用自己的模型、会话和工作空间；相关上下文由任务提示显式传递，不自动同步文件。
+- Plan 模式强制传递到所有子任务。Build 模式下，写文件和 Shell 仍在实际执行设备逐次审批。
+- 一次委派链最多两跳（A → B → A），每次等待最多 10 分钟，回复最多返回 32768 个字符。
+- 父任务取消或通信异常时尝试取消远端子任务。断网不能保证取消送达，返回的任务 ID 可用于人工核对，不能据此认为远端没有执行。
+- 委派、接收和结果事件保存在父任务记录中。进程重启不自动重放子任务。
+
+协议字段与异常处理详见 [局域网协作协议](docs/lan-collaboration.md)。两台电脑都需允许对方访问 TCP 7447；Wi-Fi 的客户端隔离可能阻止直连。`device --endpoint` 只公布地址，重启服务时仍需传入 `serve --peer-listen`。
 
 ## 中转与手机控制
 
@@ -211,6 +273,7 @@ flowchart LR
 | `tui.rs` / `client.rs` / `main.rs` | Ratatui 终端界面、daemon 自动启动、CLI |
 | `server.rs` | 本地管理 RPC 与独立加密 peer 入口 |
 | `crypto.rs` / `network.rs` | X25519 + XSalsa20-Poly1305、指纹固定、重放检查、直连/中转 |
+| `collaboration.rs` | Agent 设备列表、双向委派、远端会话追问、结果回传、只读继承与两跳限制 |
 | `relay.rs` | Argon2id 密码、7 天设备令牌、账号隔离、能力目录、在线状态、密文队列 |
 | `web/` | 手机/桌面浏览器控制端，原生 JS，无构建步骤 |
 | `store.rs` | SQLite WAL、幂等提交、一次性审批、事件游标、重启恢复 |

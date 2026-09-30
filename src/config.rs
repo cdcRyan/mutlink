@@ -17,7 +17,25 @@ pub struct Provider {
     pub base_url: String,
     pub model: String,
     pub api_key_env: String,
+    #[serde(default = "default_steps")]
     pub max_steps: usize,
+}
+
+fn default_steps() -> usize {
+    24
+}
+
+impl Provider {
+    pub fn validate(&self) -> Result<()> {
+        check_url(&self.base_url)?;
+        if self.model.trim().is_empty()
+            || self.api_key_env.trim().is_empty()
+            || !(1..=100).contains(&self.max_steps)
+        {
+            bail!("Model, API key environment name and 1–100 steps required");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

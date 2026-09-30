@@ -38,7 +38,7 @@ enum Command {
     /// Configure the model provider
     Model {
         #[command(subcommand)]
-        command: ModelCommand,
+        command: Option<ModelCommand>,
     },
     /// Set the authorized workspace (one workspace per device home)
     Workspace {
@@ -121,7 +121,15 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum ModelCommand {
+    /// List model profiles and the editable models.json path
+    List,
+    /// Select a configured profile as the default for subsequent tasks
+    Use { name: String },
+    /// Add or update a profile, and select it
     Set {
+        /// Profile name used by /model; defaults to the API model name
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         model: String,
         #[arg(long, default_value = "https://api.openai.com/v1")]
@@ -185,12 +193,15 @@ async fn run() -> Result<()> {
     let value=match cli.command.unwrap_or(Command::Tui) {
         Command::Tui => return mutlink::tui::run(client).await,
         Command::Status => client.call("status",Value::Null,None).await?,
-        Command::Model{command:ModelCommand::Set{model,base_url,api_key_env,max_steps}} => {
-            client.call("model.set",json!({"model":model,"base_url":base_url,"api_key_env":api_key_env,"max_steps":max_steps}),None).await?
-        }
+        Command::Model{command} => match command.unwrap_or(ModelCommand::List) {
+            ModelCommand::List => client.call("model.list",Value::Null,None).await?,
+            ModelCommand::Use{name} => client.call("model.use",json!({"name":name}),None).await?,
+            ModelCommand::Set{name,model,base_url,api_key_env,max_steps} =>
+                client.call("model.set",json!({"name":name,"model":model,"base_url":base_url,"api_key_env":api_key_env,"max_steps":max_steps}),None).await?,
+        },
         Command::Workspace{path} => client.call("workspace.set",json!({"path":path.canonicalize()?}),None).await?,
         Command::Run{prompt,plan,device,session,id:request_id,detach} => {
-            let request=RunRequest{id:request_id.unwrap_or_else(id),session_id:session,prompt,plan};
+            let request=RunRequest{id:request_id.unwrap_or_else(id),session_id:session,prompt,plan,delegation_depth:0};
             eprintln!("Task ID: {}",request.id);
             let task: Task=serde_json::from_value(client.call("run",json!(request),device.as_deref()).await?)?;
             if detach {json!(task)} else {return follow(&client,task,device.as_deref()).await;}
